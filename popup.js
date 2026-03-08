@@ -805,34 +805,176 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         if (isExcelFile) {
           addLog('检测到Excel文件', 'info');
-          addLog('正在尝试读取Excel文件内容...', 'info');
+          addLog('正在读取Excel文件内容...', 'info');
           
           try {
-            // 尝试使用SheetJS库读取Excel文件
-            if (typeof XLSX !== 'undefined') {
-              const arrayBuffer = await file.arrayBuffer();
-              const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-              const firstSheetName = workbook.SheetNames[0];
-              const worksheet = workbook.Sheets[firstSheetName];
-              const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-              
-              // 转换为CSV格式
-              const csvText = jsonData.map(row => row.join(',')).join('\n');
-              addLog('Excel文件转换成功，开始解析...', 'success');
-              
-              notes = await parseCsvNotes(csvText);
-              updateNotePanels();
-              addLog(`成功导入 ${notes.length} 篇笔记（Excel表格）`, 'success');
-              return;
-            } else {
-              addLog('Excel文件处理库未加载，请先转换为CSV格式', 'warning');
-              addLog('建议：在Excel中另存为CSV格式，或使用在线转换工具', 'info');
-              addLog('转换步骤：文件 → 另存为 → 选择CSV格式', 'info');
+            if (typeof XLSX === 'undefined') {
+              addLog('SheetJS 库未加载，请检查网络连接后重试', 'error');
               return;
             }
+            if (typeof JSZip === 'undefined') {
+              addLog('JSZip 库未加载，将无法提取嵌入图片', 'warning');
+            }
+
+            const arrayBuffer = await file.arrayBuffer();
+
+            // === 步骤 1：SheetJS 读取文字数据 ===
+            addLog('步骤1: 使用 SheetJS 解析单元格文字数据...', 'info');
+            const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+            const firstSheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[firstSheetName];
+            const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+            
+            if (jsonData.length < 2) {
+              addLog('Excel 至少需要标题行和一行数据', 'error');
+              return;
+            }
+
+            // 解析表头
+            const header = jsonData[0].map(h => (h || '').toString().trim());
+            addLog(`Excel 表头: ${header.join(', ')}`, 'info');
+
+            const idx = {
+              image: header.findIndex(h => h.includes('主图')),
+              productId: header.findIndex(h => h.includes('商品ID')),
+              title: header.findIndex(h => h.includes('标题')),
+              body: header.findIndex(h => h.includes('正文')),
+              tags: header.findIndex(h => h.includes('标签'))
+            };
+
+            if (idx.title === -1) {
+              addLog('Excel 缺少"标题"列', 'error');
+              return;
+            }
+
+            addLog(`字段索引: 主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}`, 'info');
+
+            // === 步骤 2：JSZip 提取嵌入图片 ===
+            let embeddedImages = {};
+            if (typeof JSZip !== 'undefined' && fileName.endsWith('.xlsx')) {
+              addLog('步骤2: 使用 JSZip 从 xlsx ZIP 结构中提取嵌入图片...', 'info');
+              try {
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                embeddedImages = await extractExcelImages(zip);
+                const embeddedCount = Object.values(embeddedImages).reduce((s, a) => s + a.length, 0);
+                addLog(`从 Excel 中提取到 ${embeddedCount} 张嵌入图片`, 'success');
+              } catch (zipError) {
+                addLog(`JSZip 解析失败: ${zipError.message}，将忽略嵌入图片`, 'warning');
+              }
+            } else if (fileName.endsWith('.xls')) {
+              addLog('.xls 格式不支持提取嵌入图片（非 ZIP 结构），仅读取文字', 'warning');
+            }
+
+            // === 步骤 3：组装笔记数据 ===
+            addLog('步骤3: 合并文字数据和图片，生成笔记...', 'info');
+            const notesArr = [];
+
+            for (let i = 1; i < jsonData.length; i++) {
+              const row = jsonData[i];
+              if (!row || row.length === 0) continue;
+
+              const getVal = (index) => {
+                return index >= 0 && index < row.length ? (row[index] || '').toString().trim() : '';
+              };
+
+              // 标题
+              const title = getVal(idx.title);
+              if (!title) {
+                addLog(`跳过第 ${i + 1} 行: 标题为空`, 'warning');
+                continue;
+              }
+
+              // 正文
+              const body = getVal(idx.body);
+
+              // 标签
+              let tags = [];
+              const tagsStr = getVal(idx.tags);
+              if (tagsStr) {
+                tags = tagsStr.split(/[#\s,，]+/).filter(Boolean).map(t => '#' + t.replace(/^#/, ''));
+              }
+
+              // 商品ID
+              const productId = getVal(idx.productId);
+
+              // 图片处理：优先使用嵌入图片，其次使用主图链接列
+              const note = {
+                title,
+                body,
+                tags,
+                productId,
+                images: [],
+                imageUrls: {}
+              };
+
+              // 嵌入图片（i 是 1-based 数据行索引，对应 drawing 中 0-based 的 rowIndex=i）
+              const rowEmbeddedImages = embeddedImages[i] || [];
+              if (rowEmbeddedImages.length > 0) {
+                addLog(`第 ${i + 1} 行匹配到 ${rowEmbeddedImages.length} 张嵌入图片`, 'success');
+                rowEmbeddedImages.forEach((dataUrl, j) => {
+                  // 将 base64 转为 Blob 用于上传
+                  try {
+                    const byteString = atob(dataUrl.split(',')[1]);
+                    const mimeString = dataUrl.split(',')[0].split(':')[1].split(';')[0];
+                    const ab = new ArrayBuffer(byteString.length);
+                    const ia = new Uint8Array(ab);
+                    for (let k = 0; k < byteString.length; k++) {
+                      ia[k] = byteString.charCodeAt(k);
+                    }
+                    const blob = new Blob([ab], { type: mimeString });
+                    note.images.push(blob);
+                    note.imageUrls[j] = dataUrl;
+                  } catch (e) {
+                    addLog(`嵌入图片转换失败: ${e.message}`, 'warning');
+                  }
+                });
+              }
+
+              // 如果没有嵌入图片，尝试从主图链接列下载
+              if (note.images.length === 0 && idx.image >= 0) {
+                const imageField = getVal(idx.image);
+                if (imageField) {
+                  const imageLinks = imageField
+                    .split(/[\n\r,，]/)
+                    .map(s => s.trim())
+                    .filter(s => s && (s.startsWith('http://') || s.startsWith('https://')))
+                    .map(s => s.replace(/[""]/g, ''));
+
+                  if (imageLinks.length > 0) {
+                    addLog(`第 ${i + 1} 行从主图链接列下载 ${imageLinks.length} 张图片...`, 'info');
+                    for (let j = 0; j < imageLinks.length; j++) {
+                      try {
+                        const res = await fetch(imageLinks[j]);
+                        const blob = await res.blob();
+                        const dataUrl = await new Promise(resolve => {
+                          const reader = new FileReader();
+                          reader.onload = e => resolve(e.target.result);
+                          reader.readAsDataURL(blob);
+                        });
+                        note.images.push(blob);
+                        note.imageUrls[note.images.length - 1] = dataUrl;
+                        addLog(`图片下载成功: ${imageLinks[j]}`, 'success');
+                      } catch (e) {
+                        addLog(`图片下载失败: ${imageLinks[j]} - ${e.message}`, 'error');
+                      }
+                    }
+                  }
+                }
+              }
+
+              notesArr.push(note);
+              addLog(`第 ${i + 1} 行解析完成: ${title} (${note.images.length} 张图片)`, 'info');
+            }
+
+            notes = notesArr;
+            updateNotePanels();
+            addLog(`成功导入 ${notes.length} 篇笔记（Excel），共 ${notes.reduce((s, n) => s + n.images.length, 0)} 张图片`, 'success');
+            return;
+
           } catch (excelError) {
-            addLog(`Excel文件读取失败: ${excelError.message}`, 'error');
-            addLog('请将Excel文件另存为CSV格式后重试', 'info');
+            addLog(`Excel 文件处理失败: ${excelError.message}`, 'error');
+            console.error('Excel 处理错误:', excelError);
+            addLog('请确保文件格式正确，或另存为 CSV 格式后重试', 'info');
             return;
           }
         }
@@ -2576,6 +2718,186 @@ function parseCsvLine(line) {
   }
   result.push(current.trim());
   return result;
+}
+
+/**
+ * 从 .xlsx 的 ZIP 结构中提取嵌入图片，并解析每张图片对应的行号
+ * @param {JSZip} zip - 用 JSZip 加载的 xlsx 文件
+ * @returns {Object} { [rowIndex]: [base64DataUrl, ...] } 按行号分组的图片数据
+ */
+async function extractExcelImages(zip) {
+  const imagesByRow = {};
+
+  try {
+    // 1. 收集 xl/media/ 目录下的所有图片文件 → { 'xl/media/image1.png': base64DataUrl }
+    const mediaFiles = {};
+    const mediaFolder = zip.folder('xl/media');
+    if (!mediaFolder) {
+      addLog('Excel 中未找到嵌入图片 (xl/media/ 不存在)', 'info');
+      return imagesByRow;
+    }
+
+    const mediaEntries = [];
+    mediaFolder.forEach((relativePath, file) => {
+      if (!file.dir && /\.(png|jpe?g|gif|bmp|webp|tiff?)$/i.test(relativePath)) {
+        mediaEntries.push({ path: 'xl/media/' + relativePath, file });
+      }
+    });
+
+    if (mediaEntries.length === 0) {
+      addLog('Excel xl/media/ 目录下没有图片文件', 'info');
+      return imagesByRow;
+    }
+
+    addLog(`发现 ${mediaEntries.length} 张嵌入图片，正在提取...`, 'info');
+
+    // 并行读取所有图片为 base64
+    await Promise.all(mediaEntries.map(async (entry) => {
+      try {
+        const uint8 = await entry.file.async('uint8array');
+        // 推断 MIME 类型
+        const ext = entry.path.split('.').pop().toLowerCase();
+        const mimeMap = {
+          png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+          gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp',
+          tif: 'image/tiff', tiff: 'image/tiff'
+        };
+        const mime = mimeMap[ext] || 'image/png';
+        // 转 base64 dataUrl
+        let binary = '';
+        for (let i = 0; i < uint8.length; i++) {
+          binary += String.fromCharCode(uint8[i]);
+        }
+        const base64 = btoa(binary);
+        mediaFiles[entry.path] = `data:${mime};base64,${base64}`;
+      } catch (e) {
+        addLog(`提取图片失败 ${entry.path}: ${e.message}`, 'warning');
+      }
+    }));
+
+    addLog(`成功提取 ${Object.keys(mediaFiles).length} 张图片数据`, 'success');
+
+    // 2. 解析 drawing 的 rels 文件，建立 rId → 图片文件路径 的映射
+    // 查找所有 drawing rels 文件
+    const drawingRelsFiles = [];
+    zip.forEach((path, file) => {
+      if (/xl\/drawings\/_rels\/drawing\d*\.xml\.rels$/i.test(path)) {
+        drawingRelsFiles.push({ path, file });
+      }
+    });
+
+    // rId → 图片绝对路径
+    const rIdToImage = {};
+    for (const relsEntry of drawingRelsFiles) {
+      try {
+        const relsXml = await relsEntry.file.async('string');
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(relsXml, 'application/xml');
+        const relationships = doc.querySelectorAll('Relationship');
+
+        relationships.forEach(rel => {
+          const rId = rel.getAttribute('Id');
+          const target = rel.getAttribute('Target');
+          if (target && /\.(png|jpe?g|gif|bmp|webp|tiff?)$/i.test(target)) {
+            // target 是相对于 xl/drawings/ 的路径，如 ../media/image1.png
+            // 转换为绝对路径
+            let absPath = target;
+            if (target.startsWith('../')) {
+              absPath = 'xl/' + target.replace('../', '');
+            } else if (!target.startsWith('xl/')) {
+              absPath = 'xl/drawings/' + target;
+            }
+            rIdToImage[rId] = absPath;
+          }
+        });
+      } catch (e) {
+        addLog(`解析 drawing rels 失败: ${e.message}`, 'warning');
+      }
+    }
+
+    addLog(`解析 rId 映射: ${Object.keys(rIdToImage).length} 条`, 'info');
+
+    // 3. 解析 drawing XML，获取每张图片的锚点位置 (行号)
+    const drawingFiles = [];
+    zip.forEach((path, file) => {
+      if (/xl\/drawings\/drawing\d*\.xml$/i.test(path) && !path.includes('_rels')) {
+        drawingFiles.push({ path, file });
+      }
+    });
+
+    for (const drawingEntry of drawingFiles) {
+      try {
+        const drawingXml = await drawingEntry.file.async('string');
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(drawingXml, 'application/xml');
+
+        // 处理 twoCellAnchor（最常见的图片锚定方式）
+        const anchors = doc.querySelectorAll('twoCellAnchor, oneCellAnchor, absoluteAnchor');
+
+        anchors.forEach(anchor => {
+          try {
+            // 获取起始行号 (from > row)
+            const fromRow = anchor.querySelector('from row');
+            if (!fromRow) return;
+            const rowIndex = parseInt(fromRow.textContent); // 0-based, 数据从第1行开始（第0行是表头）
+
+            // 获取图片的 rId (blipFill > blip 的 r:embed 属性)
+            const blip = anchor.querySelector('blip');
+            if (!blip) return;
+
+            // r:embed 属性可能带命名空间前缀
+            const rId = blip.getAttribute('r:embed') ||
+                        blip.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
+            if (!rId) return;
+
+            // 通过 rId 找到图片文件路径
+            const imagePath = rIdToImage[rId];
+            if (!imagePath) return;
+
+            // 通过路径获取 base64 数据
+            const dataUrl = mediaFiles[imagePath];
+            if (!dataUrl) return;
+
+            // 按行号分组存储
+            if (!imagesByRow[rowIndex]) {
+              imagesByRow[rowIndex] = [];
+            }
+            imagesByRow[rowIndex].push(dataUrl);
+
+            addLog(`图片 ${imagePath} → 行 ${rowIndex} (rId: ${rId})`, 'info');
+          } catch (e) {
+            // 忽略单个 anchor 解析错误
+          }
+        });
+      } catch (e) {
+        addLog(`解析 drawing XML 失败: ${e.message}`, 'warning');
+      }
+    }
+
+    // 4. 如果 drawing 解析没找到锚点信息，回退：按顺序将所有图片分配给各行
+    const totalMappedImages = Object.values(imagesByRow).reduce((sum, arr) => sum + arr.length, 0);
+    if (totalMappedImages === 0 && Object.keys(mediaFiles).length > 0) {
+      addLog('未能从 drawing XML 中解析图片位置，将按顺序分配图片到各行', 'warning');
+      const allImages = Object.values(mediaFiles);
+      allImages.forEach((dataUrl, idx) => {
+        // 从第1行开始（第0行通常是表头）
+        const row = idx + 1;
+        if (!imagesByRow[row]) {
+          imagesByRow[row] = [];
+        }
+        imagesByRow[row].push(dataUrl);
+      });
+    }
+
+    const rowCount = Object.keys(imagesByRow).length;
+    addLog(`图片提取完成: ${totalMappedImages || Object.keys(mediaFiles).length} 张图片分布在 ${rowCount} 行中`, 'success');
+
+  } catch (error) {
+    addLog(`提取 Excel 嵌入图片失败: ${error.message}`, 'error');
+    console.error('extractExcelImages 错误:', error);
+  }
+
+  return imagesByRow;
 }
 
 async function parseCsvNotes(csvText) {
