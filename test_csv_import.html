@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>CSV导入测试</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .test-section {
+      margin: 20px 0;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+    }
+    .log {
+      background: #f5f5f5;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+    .error {
+      color: red;
+    }
+    .success {
+      color: green;
+    }
+  </style>
+</head>
+<body>
+  <h1>CSV导入功能测试</h1>
+  
+  <div class="test-section">
+    <h3>测试CSV文件导入</h3>
+    <input type="file" id="testFileInput" accept=".csv">
+    <button onclick="testCsvImport()">测试导入</button>
+  </div>
+  
+  <div class="test-section">
+    <h3>测试结果</h3>
+    <div id="testResults"></div>
+  </div>
+
+  <script>
+    // 复制parseCsvNotes函数用于测试
+    function addLog(message, type = 'info') {
+      const results = document.getElementById('testResults');
+      const logDiv = document.createElement('div');
+      logDiv.className = `log ${type}`;
+      logDiv.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      results.appendChild(logDiv);
+    }
+
+    // 处理包含换行符的CSV内容
+    const parseCsvWithNewlines = (csvText) => {
+      const lines = [];
+      let currentLine = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < csvText.length; i++) {
+        const char = csvText[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+          currentLine += char;
+        } else if (char === '\n' && !inQuotes) {
+          if (currentLine.trim()) {
+            lines.push(currentLine.trim());
+          }
+          currentLine = '';
+        } else {
+          currentLine += char;
+        }
+      }
+      
+      if (currentLine.trim()) {
+        lines.push(currentLine.trim());
+      }
+      
+      return lines;
+    };
+
+    async function parseCsvNotes(csvText) {
+      try {
+        // 解析CSV为数组，支持引号内的换行符
+        const lines = parseCsvWithNewlines(csvText);
+        if (lines.length < 2) {
+          addLog('CSV文件格式错误：至少需要标题行和一行数据', 'error');
+          return [];
+        }
+        
+        // 使用更安全的CSV解析方法，支持引号内的换行符
+        const parseCsvLine = (line) => {
+          const result = [];
+          let current = '';
+          let inQuotes = false;
+          
+          for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+              inQuotes = !inQuotes;
+            } else if (char === ',' && !inQuotes) {
+              result.push(current.trim());
+              current = '';
+            } else {
+              current += char;
+            }
+          }
+          result.push(current.trim());
+          return result;
+        };
+        
+        const header = parseCsvLine(lines[0]);
+        addLog(`CSV标题行: ${header.join(', ')}`, 'info');
+        
+        // 字段索引
+        const idx = {
+          image: header.findIndex(h => h.includes('主图')),
+          productId: header.findIndex(h => h.includes('商品ID')),
+          title: header.findIndex(h => h.includes('标题')),
+          body: header.findIndex(h => h.includes('正文')),
+          tags: header.findIndex(h => h.includes('标签'))
+        };
+        
+        // 检查必要字段是否存在
+        if (idx.title === -1) {
+          addLog('CSV文件缺少"标题"字段', 'error');
+          return [];
+        }
+        
+        addLog(`字段索引: 主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}`, 'info');
+        
+        // 逐行解析
+        const notesArr = [];
+        for (let i = 1; i < lines.length; i++) {
+          try {
+            const row = parseCsvLine(lines[i]);
+            if (row.length < 2) {
+              addLog(`跳过第${i+1}行：数据不足`, 'error');
+              continue;
+            }
+            
+            // 安全获取字段值
+            const getFieldValue = (index) => {
+              return index >= 0 && index < row.length ? row[index] : '';
+            };
+            
+            // 主图链接支持多张，安全处理
+            let imageLinks = [];
+            if (idx.image >= 0 && idx.image < row.length && row[idx.image]) {
+              imageLinks = row[idx.image].split(/[,，]/).map(s => s.trim()).filter(Boolean);
+            }
+            
+            // 标签支持逗号或空格分隔，安全处理
+            let tags = [];
+            if (idx.tags >= 0 && idx.tags < row.length && row[idx.tags]) {
+              tags = row[idx.tags].split(/[#\s,，]+/).filter(Boolean).map(t => '#' + t.replace(/^#/, ''));
+            }
+            
+            // 组装笔记对象
+            const note = {
+              title: getFieldValue(idx.title),
+              body: getFieldValue(idx.body),
+              tags: tags,
+              productId: getFieldValue(idx.productId),
+              images: [],
+              imageUrls: {}
+            };
+            
+            // 主图转base64
+            note._imageLinks = imageLinks; // 临时存储，后续处理
+            notesArr.push(note);
+            
+            addLog(`解析第${i+1}行成功: ${note.title}`, 'success');
+          } catch (error) {
+            addLog(`解析第${i+1}行失败: ${error.message}`, 'error');
+          }
+        }
+        
+        addLog(`成功解析 ${notesArr.length} 篇笔记`, 'success');
+        
+        // 下载图片并转base64
+        for (let n = 0; n < notesArr.length; n++) {
+          const note = notesArr[n];
+          for (let j = 0; j < note._imageLinks.length; j++) {
+            try {
+              const url = note._imageLinks[j];
+              addLog(`正在下载图片 ${j+1}/${note._imageLinks.length}: ${url}`, 'info');
+              const res = await fetch(url);
+              const blob = await res.blob();
+              const dataUrl = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.readAsDataURL(blob);
+              });
+              note.images[j] = blob;
+              note.imageUrls[j] = dataUrl;
+              addLog(`图片下载成功: ${url}`, 'success');
+            } catch (e) {
+              addLog(`图片下载失败: ${note._imageLinks[j]} - ${e.message}`, 'error');
+            }
+          }
+          delete note._imageLinks;
+        }
+        
+        return notesArr;
+      } catch (error) {
+        addLog(`CSV解析失败: ${error.message}`, 'error');
+        return [];
+      }
+    }
+
+    async function testCsvImport() {
+      const fileInput = document.getElementById('testFileInput');
+      const file = fileInput.files[0];
+      
+      if (!file) {
+        addLog('请先选择文件', 'error');
+        return;
+      }
+      
+      addLog(`开始测试文件: ${file.name}`, 'info');
+      
+      try {
+        const text = await file.text();
+        addLog(`文件读取成功，内容长度: ${text.length} 字符`, 'info');
+        
+        const notes = await parseCsvNotes(text);
+        addLog(`测试完成，共解析 ${notes.length} 篇笔记`, 'success');
+        
+        // 显示解析结果
+        notes.forEach((note, index) => {
+          addLog(`笔记 ${index + 1}: ${note.title}`, 'info');
+          addLog(`  正文长度: ${note.body.length} 字符`, 'info');
+          addLog(`  标签数量: ${note.tags.length}`, 'info');
+          addLog(`  图片数量: ${note.images.length}`, 'info');
+        });
+        
+      } catch (error) {
+        addLog(`测试失败: ${error.message}`, 'error');
+      }
+    }
+  </script>
+</body>
+</html> 

@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 100%;
+      min-width: 350px;
+      max-width: 450px;
+      min-height: 100vh;
+      margin: 0;
+      padding: 0;
+      font-family: 'SF Pro', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #F7FAFC 60%, #E3ECF7 100%);
+      color: #2D3748;
+      overflow-x: hidden;
+    }
+    .main-wrapper {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      margin: 16px 8px 8px 8px;
+      padding: 16px 12px 12px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: calc(100vh - 32px);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .header-title {
+      font-size: 14px;
+      font-weight: bold;
+      color: #2D3748;
+      font-family: 'SF Pro', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      letter-spacing: 1px;
+      margin-left: 2px;
+      text-transform: uppercase;
+    }
+    .header-right {
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+    }
+    .icon-btn {
+      background: none;
+      border: none;
+      color: #2D3748;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+      cursor: pointer;
+      padding: 0;
+    }
+    .icon-btn:hover {
+      background: rgba(0,0,0,0.03);
+    }
+    .section-label {
+      font-size: 12px;
+      font-weight: bold;
+      color: #2D3748;
+      margin: 10px 0 6px 0;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .notes-container {
+      margin: 0 0 10px 0;
+      max-height: 220px;
+      overflow-y: auto;
+      border-radius: 12px;
+      background: #EDF2F7;
+      border: none;
+      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .settings-panel {
+      background: #EDF2F7;
+      border-radius: 12px;
+      border: none;
+      padding: 12px 8px 8px 8px;
+      margin: 0 0 10px 0;
+    }
+    .btn, button {
+      background: #EBF8FF;
+      color: #3182CE;
+      border: 1.5px solid #3182CE;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 500;
+      padding: 8px 0;
+      margin: 0;
+      cursor: pointer;
+      box-shadow: none;
+      transition: background 0.2s, border-color 0.2s;
+      outline: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn:hover, button:hover {
+      background: linear-gradient(90deg, #E3ECF7 0%, #EBF8FF 100%);
+      border-color: #2B6CB0;
+    }
+    #fileInput {
+      display: none;
+    }
+    .logs-container {
+      background: #EDF2F7;
+      border-radius: 12px;
+      border: none;
+      padding: 10px 8px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .log-panel {
+      background: none;
+      border: none;
+      padding: 0;
+      max-height: 110px;
+      overflow-y: auto;
+    }
+    .log-item {
+      border-radius: 8px;
+      margin-bottom: 6px;
+      padding: 6px 10px;
+      font-size: 13px;
+      background: #F7FAFC;
+      color: #2D3748;
+      border-left: 4px solid #E2E8F0;
+    }
+    .log-item.success {
+      background: #EBF8FF;
+      color: #3182CE;
+      border-left-color: #3182CE;
+    }
+    .log-item.error {
+      background: #FFF5F5;
+      color: #E53E3E;
+      border-left-color: #E53E3E;
+    }
+    .log-item.step {
+      background: #FFFAF0;
+      color: #D69E2E;
+      border-left-color: #D69E2E;
+    }
+    .note-panel {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 0;
+      padding: 12px 10px 10px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    /* 预留icon样式 */
+    .svg-icon {
+      width: 18px;
+      height: 18px;
+      stroke: #3182CE;
+      stroke-width: 1.5;
+      fill: none;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    /* 让按钮并排 */
+    .note-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .image-preview {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+      min-height: 60px;
+    }
+    .image-preview img {
+      width: 60px;
+      height: 60px;
+      border-radius: 8px;
+      border: 1.5px solid #E2E8F0;
+      object-fit: cover;
+      background: #F7FAFC;
+    }
+    .preview-item label {
+      font-weight: 500;
+      color: #2D3748;
+      margin-right: 4px;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .preview-item input, .preview-item textarea {
+      border: 1.5px solid #E2E8F0;
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 14px;
+      color: #2D3748;
+      background: #fff;
+      margin-top: 2px;
+      margin-bottom: 2px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .preview-item textarea {
+      min-height: 40px;
+      resize: vertical;
+    }
+    /* 重要操作卡片 */
+    .important-card {
+      background: #EBF8FF;
+      border: 1.5px solid #3182CE;
+      border-radius: 12px;
+      padding: 12px 10px;
+      margin-bottom: 8px;
+      box-shadow: 0 1px 3px rgba(49,130,206,0.08);
+    }
+    /* 卡片间距 */
+    .card + .card {
+      margin-top: 8px;
+    }
+    
+    /* 卡密验证界面样式 */
+    .auth-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: calc(100vh - 100px);
+      text-align: center;
+      padding: 20px;
+    }
+    .auth-logo {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 20px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 32px;
+      font-weight: bold;
+    }
+    .auth-title {
+      font-size: 18px;
+      font-weight: bold;
+      color: #2D3748;
+      margin-bottom: 8px;
+    }
+    .auth-subtitle {
+      font-size: 14px;
+      color: #718096;
+      margin-bottom: 24px;
+    }
+    .auth-form {
+      width: 100%;
+      max-width: 300px;
+    }
+    .auth-input {
+      width: 100%;
+      padding: 12px 16px;
+      border: 2px solid #E2E8F0;
+      border-radius: 8px;
+      font-size: 14px;
+      margin-bottom: 16px;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    .auth-input:focus {
+      outline: none;
+      border-color: #3182CE;
+    }
+    .auth-btn {
+      width: 100%;
+      padding: 12px 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .auth-btn:hover {
+      transform: translateY(-1px);
+    }
+    .auth-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .auth-status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .auth-status.success {
+      background: #EBF8FF;
+      color: #3182CE;
+      border: 1px solid #3182CE;
+    }
+    .auth-status.error {
+      background: #FFF5F5;
+      color: #E53E3E;
+      border: 1px solid #E53E3E;
+    }
+    .auth-status.warning {
+      background: #FFFAF0;
+      color: #D69E2E;
+      border: 1px solid #D69E2E;
+    }
+    .auth-info {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #718096;
+      line-height: 1.5;
+      text-align: left;
+    }
+    .auth-version {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      font-size: 12px;
+      color: #A0AEC0;
+    }
+    
+    /* 隐藏主功能界面 */
+    .main-content {
+      display: none;
+    }
+    .main-content.show {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <!-- 卡密验证界面 -->
+  <div id="authContainer" class="auth-container">
+    <div class="auth-logo">XHS</div>
+    <div class="auth-title">小红书自动发布插件</div>
+    <div class="auth-subtitle">请输入卡密进行验证</div>
+    
+    <form class="auth-form" id="authForm">
+      <input type="text" class="auth-input" id="cardKey" placeholder="请输入卡密" required>
+      <button type="submit" class="auth-btn" id="loginBtn">
+        <span id="loginBtnText">登录验证</span>
+        <span id="loginBtnLoading" style="display: none;">验证中...</span>
+      </button>
+    </form>
+    
+    <div id="authStatus" class="auth-status" style="display: none;">
+      <span id="authStatusText"></span>
+    </div>
+    
+    <div class="auth-info">
+      <div>• 卡密绑定电脑机器码，同一台电脑多个浏览器可共用</div>
+      <div>• 一个卡密只能在一台电脑上使用，防止多设备滥用</div>
+      <div>• 系统会定期检测卡密状态，被禁用后自动退出</div>
+      <div>• 卡密到期后需要重新购买</div>
+      <div>• 如遇问题请联系客服</div>
+    </div>
+    
+    <div class="auth-version">v2.0</div>
+  </div>
+
+  <!-- 主功能界面 -->
+  <div id="mainContent" class="main-content">
+    <div class="main-wrapper card">
+      <div class="header">
+        <span class="header-title">小红书全自动发布助手V3.0</span>
+        <div class="header-right">
+          <button class="icon-btn help-btn" title="使用说明">
+            <svg class="svg-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="17" r=".5"/></svg>
+          </button>
+          <button class="icon-btn close-btn" title="关闭">
+            <svg class="svg-icon" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="section-label">1. 选择文档文件</div>
+      <input type="file" id="fileInput" accept=".csv,.txt,.xlsx,.xls" style="display: none;">
+      <button id="readFile" class="btn important-card">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
+        选择文档文件 (支持CSV/TXT/Excel)
+      </button>
+      <div class="section-label">2. 笔记预览区</div>
+      <div class="notes-container card"><!-- 笔记面板会动态添加到这里 --></div>
+      <div class="section-label">3. 发布间隔设置</div>
+      <div class="settings-panel card">
+        <div class="setting-item">
+          <label>发布间隔设置:</label>
+          <div class="interval-type">
+            <label>
+              <input type="radio" name="intervalType" value="fixed" checked>
+              固定间隔
+            </label>
+            <label>
+              <input type="radio" name="intervalType" value="random">
+              随机间隔
+            </label>
+          </div>
+        </div>
+        <div class="setting-item fixed-interval">
+          <label>固定间隔时间(分钟):</label>
+          <input type="number" id="fixedInterval" value="5" min="1" max="60">
+        </div>
+        <div class="setting-item random-interval" style="display: none;">
+          <label>随机间隔范围(分钟):</label>
+          <div class="range-inputs">
+            <input type="number" id="minInterval" value="5" min="1" max="60">
+            <span>至</span>
+            <input type="number" id="maxInterval" value="10" min="1" max="60">
+          </div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button id="startButton" class="btn important-card">
+          <svg class="svg-icon" viewBox="0 0 24 24"><path d="M5 3v18l15-9L5 3z"/></svg>
+          开始运行
+        </button>
+        <button id="clearAllButton" class="btn important-card" style="color:#E53E3E; border-color:#E53E3E; background:#FFF5F5;">
+          <svg class="svg-icon" viewBox="0 0 40 40"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          终止程序
+        </button>
+      </div>
+      <div class="section-label">4. 日志预览</div>
+      <div class="logs-container card">
+        <div class="log-panel" id="logPanel"></div>
+      </div>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html> 
