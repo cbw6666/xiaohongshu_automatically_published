@@ -835,19 +835,30 @@ document.addEventListener('DOMContentLoaded', async () => {
             addLog(`Excel 表头: ${header.join(', ')}`, 'info');
 
             const idx = {
-              image: header.findIndex(h => h.includes('主图')),
-              productId: header.findIndex(h => h.includes('商品ID')),
+              image: header.findIndex(h => h.includes('主图') || h.includes('封面')),
+              productId: header.findIndex(h => h.includes('商品ID') || h.includes('商品id')),
               title: header.findIndex(h => h.includes('标题')),
               body: header.findIndex(h => h.includes('正文')),
               tags: header.findIndex(h => h.includes('标签'))
             };
+
+            // 动态收集所有"内页图"列（不限数量）
+            const innerImageCols = [];
+            header.forEach((h, colIdx) => {
+              if (/内页/.test(h)) {
+                innerImageCols.push(colIdx);
+              }
+            });
+            // 按列索引排序，确保内页图1在内页图2前面
+            innerImageCols.sort((a, b) => a - b);
+            addLog(`封面列=${idx.image}, 内页图列=[${innerImageCols.join(',')}] (共${innerImageCols.length}列)`, 'info');
 
             if (idx.title === -1) {
               addLog('Excel 缺少"标题"列', 'error');
               return;
             }
 
-            addLog(`字段索引: 主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}`, 'info');
+            addLog(`字段索引: 封面/主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}`, 'info');
 
             // === 步骤 2：JSZip 提取嵌入图片 ===
             let embeddedImages = {};
@@ -930,33 +941,39 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
               }
 
-              // 如果没有嵌入图片，尝试从主图链接列下载
-              if (note.images.length === 0 && idx.image >= 0) {
-                const imageField = getVal(idx.image);
-                if (imageField) {
-                  const imageLinks = imageField
+              // 如果没有嵌入图片，尝试从封面列+所有内页图列下载图片链接
+              if (note.images.length === 0) {
+                // 收集所有图片列：封面 + 内页图1~N
+                const allImageCols = [];
+                if (idx.image >= 0) allImageCols.push(idx.image);
+                allImageCols.push(...innerImageCols);
+
+                for (const colIdx of allImageCols) {
+                  const cellValue = getVal(colIdx);
+                  if (!cellValue) continue;
+
+                  // 支持单元格内多个链接（换行/逗号分隔）
+                  const imageLinks = cellValue
                     .split(/[\n\r,，]/)
                     .map(s => s.trim())
                     .filter(s => s && (s.startsWith('http://') || s.startsWith('https://')))
                     .map(s => s.replace(/[""]/g, ''));
 
-                  if (imageLinks.length > 0) {
-                    addLog(`第 ${i + 1} 行从主图链接列下载 ${imageLinks.length} 张图片...`, 'info');
-                    for (let j = 0; j < imageLinks.length; j++) {
-                      try {
-                        const res = await fetch(imageLinks[j]);
-                        const blob = await res.blob();
-                        const dataUrl = await new Promise(resolve => {
-                          const reader = new FileReader();
-                          reader.onload = e => resolve(e.target.result);
-                          reader.readAsDataURL(blob);
-                        });
-                        note.images.push(blob);
-                        note.imageUrls[note.images.length - 1] = dataUrl;
-                        addLog(`图片下载成功: ${imageLinks[j]}`, 'success');
-                      } catch (e) {
-                        addLog(`图片下载失败: ${imageLinks[j]} - ${e.message}`, 'error');
-                      }
+                  for (let j = 0; j < imageLinks.length; j++) {
+                    try {
+                      addLog(`第 ${i + 1} 行下载图片: ${imageLinks[j]}`, 'info');
+                      const res = await fetch(imageLinks[j]);
+                      const blob = await res.blob();
+                      const dataUrl = await new Promise(resolve => {
+                        const reader = new FileReader();
+                        reader.onload = e => resolve(e.target.result);
+                        reader.readAsDataURL(blob);
+                      });
+                      note.images.push(blob);
+                      note.imageUrls[note.images.length - 1] = dataUrl;
+                      addLog(`图片下载成功: ${imageLinks[j]}`, 'success');
+                    } catch (e) {
+                      addLog(`图片下载失败: ${imageLinks[j]} - ${e.message}`, 'error');
                     }
                   }
                 }
@@ -1169,20 +1186,31 @@ document.addEventListener('DOMContentLoaded', async () => {
           return;
         }
 
-        // 检查笔记内容
-        for (let i = 0; i < notes.length; i++) {
-          if (!notes[i].title || notes[i].images.length === 0) {
-            addLog(`第${i + 1}篇笔记缺少标题或图片`, 'error');
+        // 获取起始行号，截取从该行开始的笔记
+        const startRow = parseInt(document.getElementById('startRow').value) || 1;
+        const slicedNotes = notes.slice(startRow - 1);
+
+        if (slicedNotes.length === 0) {
+          addLog(`起始行 ${startRow} 超出笔记总数 ${notes.length}，请调整`, 'error');
+          return;
+        }
+
+        // 检查笔记内容（只检查要发布的笔记）
+        for (let i = 0; i < slicedNotes.length; i++) {
+          if (!slicedNotes[i].title || slicedNotes[i].images.length === 0) {
+            addLog(`第${startRow + i}篇笔记缺少标题或图片`, 'error');
             return;
           }
         }
+
+        addLog(`从第 ${startRow} 行开始，共发布 ${slicedNotes.length} 篇笔记`, 'info');
 
         // 发送开始发布消息
         const publishResponse = await new Promise((resolve) => {
           chrome.runtime.sendMessage({
             type: 'START_PUBLISH',
             data: {
-              notes: notes,
+              notes: slicedNotes,
               publishConfig: publishConfig
             }
           }, (response) => {
@@ -2836,10 +2864,12 @@ async function extractExcelImages(zip) {
 
         anchors.forEach(anchor => {
           try {
-            // 获取起始行号 (from > row)
+            // 获取起始行号和列号
             const fromRow = anchor.querySelector('from row');
+            const fromCol = anchor.querySelector('from col');
             if (!fromRow) return;
             const rowIndex = parseInt(fromRow.textContent); // 0-based, 数据从第1行开始（第0行是表头）
+            const colIndex = fromCol ? parseInt(fromCol.textContent) : 999;
 
             // 获取图片的 rId (blipFill > blip 的 r:embed 属性)
             const blip = anchor.querySelector('blip');
@@ -2858,13 +2888,13 @@ async function extractExcelImages(zip) {
             const dataUrl = mediaFiles[imagePath];
             if (!dataUrl) return;
 
-            // 按行号分组存储
+            // 按行号分组存储，携带列号用于排序
             if (!imagesByRow[rowIndex]) {
               imagesByRow[rowIndex] = [];
             }
-            imagesByRow[rowIndex].push(dataUrl);
+            imagesByRow[rowIndex].push({ dataUrl, colIndex });
 
-            addLog(`图片 ${imagePath} → 行 ${rowIndex} (rId: ${rId})`, 'info');
+            addLog(`图片 ${imagePath} → 行${rowIndex} 列${colIndex} (rId: ${rId})`, 'info');
           } catch (e) {
             // 忽略单个 anchor 解析错误
           }
@@ -2892,6 +2922,18 @@ async function extractExcelImages(zip) {
     const rowCount = Object.keys(imagesByRow).length;
     addLog(`图片提取完成: ${totalMappedImages || Object.keys(mediaFiles).length} 张图片分布在 ${rowCount} 行中`, 'success');
 
+    // 5. 按列号排序，确保封面在前，内页按顺序排列
+    for (const row of Object.keys(imagesByRow)) {
+      const imgs = imagesByRow[row];
+      if (Array.isArray(imgs) && imgs.length > 0 && typeof imgs[0] === 'object' && imgs[0].colIndex !== undefined) {
+        // 按列号升序排列
+        imgs.sort((a, b) => a.colIndex - b.colIndex);
+        // 转回纯 dataUrl 数组
+        imagesByRow[row] = imgs.map(item => item.dataUrl);
+      }
+      addLog(`行${row}: ${imagesByRow[row].length} 张图片（已按列排序）`, 'info');
+    }
+
   } catch (error) {
     addLog(`提取 Excel 嵌入图片失败: ${error.message}`, 'error');
     console.error('extractExcelImages 错误:', error);
@@ -2914,12 +2956,21 @@ async function parseCsvNotes(csvText) {
     
     // 字段索引
     const idx = {
-      image: header.findIndex(h => h.includes('主图')),
-      productId: header.findIndex(h => h.includes('商品ID')),
+      image: header.findIndex(h => h.includes('主图') || h.includes('封面')),
+      productId: header.findIndex(h => h.includes('商品ID') || h.includes('商品id')),
       title: header.findIndex(h => h.includes('标题')),
       body: header.findIndex(h => h.includes('正文')),
       tags: header.findIndex(h => h.includes('标签'))
     };
+
+    // 动态收集所有"内页图"列
+    const innerImageCols = [];
+    header.forEach((h, colIdx) => {
+      if (/内页/.test(h)) {
+        innerImageCols.push(colIdx);
+      }
+    });
+    innerImageCols.sort((a, b) => a - b);
     
     // 检查必要字段是否存在
     if (idx.title === -1) {
@@ -2927,7 +2978,7 @@ async function parseCsvNotes(csvText) {
       return [];
     }
     
-    addLog(`字段索引: 主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}`, 'info');
+    addLog(`字段索引: 封面/主图=${idx.image}, 商品ID=${idx.productId}, 标题=${idx.title}, 正文=${idx.body}, 标签=${idx.tags}, 内页图列=[${innerImageCols.join(',')}]`, 'info');
     
     // 逐行解析
     const notesArr = [];
@@ -2944,21 +2995,28 @@ async function parseCsvNotes(csvText) {
           return index >= 0 && index < row.length ? row[index] : '';
         };
         
-        // 主图链接支持多张，安全处理 - 支持换行符分隔的多个链接
+        // 图片链接支持多列多张，安全处理 - 支持封面列+所有内页图列
         let imageLinks = [];
-        if (idx.image >= 0 && idx.image < row.length && row[idx.image]) {
-          const imageField = row[idx.image];
-          addLog(`第${i+1}行主图字段原始内容: ${imageField}`, 'info');
-          
-          // 先按换行符分割，再按逗号分割，然后过滤出http/https链接
-          const allLinks = imageField
-            .split(/[\n\r,，]/) // 支持换行符、回车符、逗号、中文逗号分隔
-            .map(s => s.trim())
-            .filter(s => s && (s.startsWith('http://') || s.startsWith('https://')))
-            .map(s => s.replace(/[""]/g, '')); // 移除可能的引号
-          imageLinks = allLinks;
-          
-          addLog(`第${i+1}行解析出 ${imageLinks.length} 个有效图片链接: ${imageLinks.join(', ')}`, 'success');
+        // 收集所有图片列：封面 + 内页图1~N
+        const allImageCols = [];
+        if (idx.image >= 0) allImageCols.push(idx.image);
+        allImageCols.push(...innerImageCols);
+
+        for (const colIdx of allImageCols) {
+          if (colIdx >= 0 && colIdx < row.length && row[colIdx]) {
+            const imageField = row[colIdx];
+            // 按换行符/逗号分割，过滤出http/https链接
+            const links = imageField
+              .split(/[\n\r,，]/)
+              .map(s => s.trim())
+              .filter(s => s && (s.startsWith('http://') || s.startsWith('https://')))
+              .map(s => s.replace(/[""]/g, ''));
+            imageLinks.push(...links);
+          }
+        }
+        
+        if (imageLinks.length > 0) {
+          addLog(`第${i+1}行解析出 ${imageLinks.length} 个有效图片链接`, 'success');
         }
         
         // 标签支持逗号或空格分隔，安全处理
