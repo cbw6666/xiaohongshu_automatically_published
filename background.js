@@ -82,6 +82,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { success: true };
 
       case 'GET_STATE':
+        // Service Worker 重启后内存中 publishState 会丢失，从 storage 恢复
+        if (!publishState.isPublishing) {
+          const saved = await chrome.storage.local.get('publishProgress');
+          if (saved.publishProgress && saved.publishProgress.isPublishing) {
+            const p = saved.publishProgress;
+            // 如果在等待中，计算剩余秒数
+            let waitTime = 0;
+            if (p.waitEndTime && p.waitEndTime > Date.now()) {
+              waitTime = Math.ceil((p.waitEndTime - Date.now()) / 1000);
+            }
+            return {
+              isPublishing: true,
+              currentIndex: p.currentIndex,
+              totalNotes: p.totalNotes,
+              currentAction: p.currentAction || '等待发布下一篇...',
+              waitTime
+            };
+          }
+        }
         return publishState;
 
       case 'STOP_PUBLISH':
@@ -106,7 +125,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // async
 });
 
-// ===================== 立即发布 =====================
+// ===================== 立即发布（启动入口） =====================
 async function startPublishing(data) {
   if (publishState.isPublishing) return;
 
@@ -138,57 +157,123 @@ async function startPublishing(data) {
     });
     publishState.tabId = tab.id;
 
-    for (let i = startIndex; i < endIndex; i++) {
-      if (!publishState.isPublishing) break;
-
-      try {
-        const note = notesData[i];
-        // 从 IndexedDB 逐篇读取图片
-        const blobs = await getAllImagesForNote(i, note.imageCount);
-        // 转 base64 用于 content script
-        const imageDataUrls = [];
-        for (const blob of blobs) {
-          imageDataUrls.push(await blobToDataUrl(blob));
-        }
-
-        await publishSingleNote(note, imageDataUrls, tab.id);
-
-        publishState.currentIndex++;
-        notifyPopup('NOTE_PUBLISHED', {
-          index: i,
-          total: publishState.totalNotes
-        });
-
-        // 非最后一篇，等待间隔
-        if (i < endIndex - 1) {
-          const waitTime = calculateWaitTime(publishConfig);
-          publishState.waitTime = waitTime;
-          publishState.currentAction = '等待发布下一篇';
-
-          notifyPopup('WAITING', {
-            nextIndex: i + 1,
-            waitTime,
-            currentTime: new Date().toLocaleTimeString()
-          });
-
-          await wait(waitTime);
-        }
-
-      } catch (error) {
-        console.error('发布笔记失败:', error);
-        notifyPopup('ERROR', error.message);
-        break;
+    // 把发布进度保存到 storage（Service Worker 被杀后可恢复）
+    await chrome.storage.local.set({
+      publishProgress: {
+        isPublishing: true,
+        startIndex,
+        endIndex,
+        currentNoteIndex: startIndex,  // 当前要发布的笔记在 notesData 中的索引
+        currentIndex: 0,               // 已发布篇数
+        totalNotes: endIndex - startIndex,
+        publishConfig,
+        tabId: tab.id,
+        currentAction: '准备发布'
       }
-    }
+    });
 
-    if (publishState.currentIndex >= publishState.totalNotes) {
-      notifyPopup('COMPLETED');
-    }
-
-    await cleanup();
+    // 发布第一篇（后续由 alarm 驱动）
+    await publishCurrentNote();
 
   } catch (error) {
     console.error('启动发布失败:', error);
+    notifyPopup('ERROR', error.message);
+    await cleanup();
+  }
+}
+
+// ===================== 逐篇发布（alarm 驱动核心） =====================
+async function publishCurrentNote() {
+  // 从 storage 读取进度
+  const saved = await chrome.storage.local.get('publishProgress');
+  const progress = saved.publishProgress;
+
+  if (!progress || !progress.isPublishing) {
+    await cleanup();
+    return;
+  }
+
+  const notesData = await getNotesMeta();
+  if (!notesData || notesData.length === 0) {
+    notifyPopup('ERROR', '笔记数据丢失');
+    await cleanup();
+    return;
+  }
+
+  const i = progress.currentNoteIndex;
+
+  // 恢复内存中的状态
+  publishState.isPublishing = true;
+  publishState.currentIndex = progress.currentIndex;
+  publishState.totalNotes = progress.totalNotes;
+  publishState.publishConfig = progress.publishConfig;
+  publishState.tabId = progress.tabId;
+
+  try {
+    const note = notesData[i];
+    // 从 IndexedDB 逐篇读取图片
+    const blobs = await getAllImagesForNote(i, note.imageCount);
+    // 转 base64 用于 content script
+    const imageDataUrls = [];
+    for (const blob of blobs) {
+      imageDataUrls.push(await blobToDataUrl(blob));
+    }
+
+    await publishSingleNote(note, imageDataUrls, progress.tabId);
+
+    // 发布成功，更新进度
+    const newCurrentIndex = progress.currentIndex + 1;
+    const nextNoteIndex = i + 1;
+
+    publishState.currentIndex = newCurrentIndex;
+    notifyPopup('NOTE_PUBLISHED', {
+      index: i,
+      total: progress.totalNotes
+    });
+
+    // 检查是否全部发完
+    if (nextNoteIndex >= progress.endIndex) {
+      notifyPopup('COMPLETED');
+      await cleanup();
+      return;
+    }
+
+    // 还有下一篇，设置 alarm 等待
+    const waitTime = calculateWaitTime(progress.publishConfig);
+
+    // 更新 storage 中的进度（指向下一篇）
+    await chrome.storage.local.set({
+      publishProgress: {
+        ...progress,
+        currentNoteIndex: nextNoteIndex,
+        currentIndex: newCurrentIndex,
+        currentAction: '等待发布下一篇',
+        waitTime,
+        waitStartTime: Date.now(),
+        waitEndTime: Date.now() + waitTime * 1000
+      }
+    });
+
+    publishState.waitTime = waitTime;
+    publishState.currentAction = '等待发布下一篇';
+
+    notifyPopup('WAITING', {
+      nextIndex: nextNoteIndex + 1,
+      waitTime,
+      currentTime: new Date().toLocaleTimeString()
+    });
+
+    // 用 chrome.alarms 等待，不用 setTimeout！
+    // alarms 最小精度约 30 秒，delayInMinutes 小于 0.5 时 Chrome 会自动拉到约 30 秒
+    const delayMinutes = Math.max(waitTime / 60, 0.5);
+    await chrome.alarms.create('noteInterval', {
+      delayInMinutes: delayMinutes
+    });
+
+    console.log(`下一篇将在 ${waitTime} 秒后发布（alarm 设 ${delayMinutes.toFixed(2)} 分钟）`);
+
+  } catch (error) {
+    console.error('发布笔记失败:', error);
     notifyPopup('ERROR', error.message);
     await cleanup();
   }
@@ -251,19 +336,27 @@ function getScheduleState() {
   };
 }
 
-// Alarm 触发
+// ===================== Alarm 统一监听 =====================
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== 'dailyPublish') return;
-  
-  // 从 storage 恢复 scheduleConfig
-  if (!scheduleConfig) {
-    const data = await chrome.storage.local.get('scheduleConfig');
-    scheduleConfig = data.scheduleConfig;
+  if (alarm.name === 'noteInterval') {
+    // 篇间等待结束，发布下一篇
+    console.log('篇间等待 alarm 触发，开始发布下一篇');
+    await publishCurrentNote();
+    return;
   }
 
-  if (!scheduleConfig) return;
+  if (alarm.name === 'dailyPublish') {
+    // 从 storage 恢复 scheduleConfig
+    if (!scheduleConfig) {
+      const data = await chrome.storage.local.get('scheduleConfig');
+      scheduleConfig = data.scheduleConfig;
+    }
 
-  await handleDailyStart();
+    if (!scheduleConfig) return;
+
+    await handleDailyStart();
+    return;
+  }
 });
 
 async function handleDailyStart() {
@@ -586,16 +679,6 @@ function calculateWaitTime(config) {
   return config.fixedInterval;
 }
 
-async function wait(seconds) {
-  for (let i = seconds; i > 0; i--) {
-    if (!publishState.isPublishing) break;
-    publishState.waitTime = i;
-    publishState.currentAction = `等待 ${i} 秒后发布下一篇...`;
-    notifyPopup('COUNTDOWN', { remainingTime: i, totalTime: seconds });
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  publishState.waitTime = 0;
-}
 
 function notifyPopup(type, data) {
   const time = new Date().toLocaleTimeString();
@@ -665,11 +748,14 @@ async function cleanup() {
     currentAction: '',
     waitTime: 0
   };
-  await chrome.storage.local.remove(['pState']);
+  await chrome.alarms.clear('noteInterval');
+  await chrome.storage.local.remove(['pState', 'publishProgress']);
 }
 
 async function stopPublishing() {
   publishState.isPublishing = false;
+  await chrome.alarms.clear('noteInterval');
+  await chrome.storage.local.remove('publishProgress');
   notifyPopup('STOPPED');
   try {
     if (publishState.tabId) {
@@ -689,11 +775,22 @@ async function getNotesMeta() {
 chrome.runtime.onStartup.addListener(async () => {
   try {
     // 恢复定时发布
-    const data = await chrome.storage.local.get('scheduleConfig');
+    const data = await chrome.storage.local.get(['scheduleConfig', 'publishProgress']);
     if (data.scheduleConfig) {
       scheduleConfig = data.scheduleConfig;
       await setDailyAlarm(scheduleConfig.dailyStartTime);
       console.log('已恢复定时发布设置');
+    }
+    // 恢复发布进度到内存（alarm 会自动触发 publishCurrentNote）
+    if (data.publishProgress && data.publishProgress.isPublishing) {
+      const p = data.publishProgress;
+      publishState.isPublishing = true;
+      publishState.currentIndex = p.currentIndex;
+      publishState.totalNotes = p.totalNotes;
+      publishState.publishConfig = p.publishConfig;
+      publishState.tabId = p.tabId;
+      publishState.currentAction = p.currentAction || '等待发布下一篇';
+      console.log('已恢复发布进度，等待 alarm 触发继续发布');
     }
   } catch (e) {
     console.error('恢复状态失败:', e);
