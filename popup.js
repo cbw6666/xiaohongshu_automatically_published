@@ -252,7 +252,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateStatusDisplay(message.data.state);
         break;
       case 'DAILY_PUBLISH_START':
-        addLog(`定时发布启动: 今日第${message.data.day}天，从第${message.data.startRow}行开始`, 'success');
+        addLog(`定时发布启动: 今日第${message.data.day}天，从第${message.data.startRow}篇开始`, 'success');
         break;
       case 'DAILY_PUBLISH_DONE':
         addLog(`今日定时发布完成，共发布${message.data.count}篇`, 'success');
@@ -424,7 +424,7 @@ async function handleExcelFile(file, fileName) {
           addLog(`嵌入图片转换失败: ${e.message}`, 'warning');
         }
       }
-      addLog(`第${i + 1}行: ${imageCount}张嵌入图片已存入IDB`, 'success');
+      addLog(`第${i + 1}篇: ${imageCount}张嵌入图片已存入`, 'success');
     }
 
     // 如果没有嵌入图片，从链接下载
@@ -456,7 +456,7 @@ async function handleExcelFile(file, fileName) {
     }
 
     notesArr.push({ title, body, tags, productId, imageCount });
-    addLog(`第${i + 1}行: ${title} (${imageCount}张图)`, 'info');
+    addLog(`第${i + 1}篇: ${title} (${imageCount}张图)`, 'info');
   }
 
   notes = notesArr;
@@ -543,7 +543,7 @@ async function parseCsvNotes(csvText) {
         imageCount
       });
     } catch (e) {
-      addLog(`解析第${i + 1}行失败: ${e.message}`, 'error');
+      addLog(`解析第${i + 1}篇失败: ${e.message}`, 'error');
     }
   }
 
@@ -587,7 +587,7 @@ async function startImmediatePublish() {
 
   const startIndex = startRow - 1;
   if (startIndex >= notes.length) {
-    addLog(`起始行 ${startRow} 超出笔记总数 ${notes.length}`, 'error');
+    addLog(`起始篇 ${startRow} 超出笔记总数 ${notes.length}`, 'error');
     return;
   }
 
@@ -602,7 +602,7 @@ async function startImmediatePublish() {
     }
   }
 
-  addLog(`立即发布: 从第${startRow}行开始，共${count}篇`, 'info');
+  addLog(`立即发布: 从第${startRow}篇开始，共${count}篇`, 'info');
 
   const publishResponse = await new Promise((resolve) => {
     chrome.runtime.sendMessage({
@@ -634,7 +634,7 @@ async function startScheduledPublish() {
   const minInterval = parseInt(document.getElementById('schedMinInterval').value) * 60;
   const maxInterval = parseInt(document.getElementById('schedMaxInterval').value) * 60;
 
-  addLog(`定时发布设置: 每天${dailyStartTime}启动，每天${dailyCount}篇，从第${startRow}行开始`, 'info');
+  addLog(`定时发布设置: 每天${dailyStartTime}启动，每天${dailyCount}篇，从第${startRow}篇开始`, 'info');
 
   const resp = await new Promise((resolve) => {
     chrome.runtime.sendMessage({
@@ -855,19 +855,44 @@ function startStatusUpdates() {
 }
 
 function updateStatusDisplay(state) {
+  // 状态更新不再需要处理倒计时，倒计时由客户端 startCountdown 驱动
+}
+
+function startCountdown(totalSeconds, current, total) {
+  // 清除旧的倒计时
+  if (window.countdownTimer) clearInterval(window.countdownTimer);
+
+  let remaining = totalSeconds;
   const logPanel = document.getElementById('logPanel');
   if (!logPanel) return;
 
-  if (state.countdown) {
-    let statusDiv = logPanel.querySelector('.log-item.countdown');
-    if (!statusDiv) {
-      statusDiv = document.createElement('div');
-      statusDiv.className = 'log-item countdown';
-      logPanel.appendChild(statusDiv);
-    }
-    statusDiv.textContent = `发布 ${state.currentIndex + 1}/${state.totalNotes} | 倒计时: ${state.countdown.current}s`;
-    logPanel.scrollTop = logPanel.scrollHeight;
+  // 创建或复用倒计时显示元素
+  let countdownDiv = logPanel.querySelector('.log-item.countdown');
+  if (!countdownDiv) {
+    countdownDiv = document.createElement('div');
+    countdownDiv.className = 'log-item countdown';
+    logPanel.appendChild(countdownDiv);
   }
+
+  // 立即显示一次
+  const im = Math.floor(remaining / 60);
+  const is = remaining % 60;
+  countdownDiv.textContent = `已发 ${current}/${total} 篇 | 下一篇倒计时: ${im}分${String(is).padStart(2, '0')}秒`;
+  logPanel.scrollTop = logPanel.scrollHeight;
+
+  window.countdownTimer = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(window.countdownTimer);
+      window.countdownTimer = null;
+      if (countdownDiv.parentNode) countdownDiv.remove();
+      return;
+    }
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    countdownDiv.textContent = `已发 ${current}/${total} 篇 | 下一篇倒计时: ${m}分${String(s).padStart(2, '0')}秒`;
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }, 1000);
 }
 
 // ===================== 工具函数 =====================

@@ -228,6 +228,7 @@ async function publishCurrentNote() {
     publishState.currentIndex = newCurrentIndex;
     notifyPopup('NOTE_PUBLISHED', {
       index: i,
+      current: newCurrentIndex,
       total: progress.totalNotes
     });
 
@@ -258,8 +259,10 @@ async function publishCurrentNote() {
     publishState.currentAction = '等待发布下一篇';
 
     notifyPopup('WAITING', {
-      nextIndex: nextNoteIndex + 1,
+      nextIndex: nextNoteIndex,
       waitTime,
+      current: newCurrentIndex,
+      total: progress.totalNotes,
       currentTime: new Date().toLocaleTimeString()
     });
 
@@ -686,10 +689,10 @@ function notifyPopup(type, data) {
 
   switch (type) {
     case 'NOTE_PUBLISHED':
-      message = `[${time}] 成功发布第 ${data.index + 1}/${data.total} 篇笔记`;
+      message = `[${time}] 第${data.index + 1}篇发布成功（已发 ${data.current}/${data.total} 篇）`;
       break;
     case 'WAITING':
-      message = `[${time}] 等待发布第 ${data.nextIndex + 1} 篇`;
+      message = `[${time}] 正在准备第 ${data.nextIndex + 1} 篇（${data.current}/${data.total}）`;
       break;
     case 'ACTION_UPDATE':
       message = `[${time}] ${publishState.currentAction}`;
