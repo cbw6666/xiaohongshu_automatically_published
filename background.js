@@ -655,27 +655,21 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
         element.dispatchEvent(new Event('change', { bubbles: true }));
       }
 
-      // 模拟逐段输入正文（段间有停顿）
-      async function simulateEditorInput(editor, bodyText, tags) {
-        simulateClick(editor);
+      // 正文输入（一次性填入）
+      function simulateEditorInput(editor, bodyText, tags) {
         editor.focus();
         editor.innerHTML = '';
 
         const lines = bodyText.split('\n');
-        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-          const line = lines[lineIdx];
+        lines.forEach(line => {
           const p = document.createElement('p');
           if (line.trim() === '') {
-            p.innerHTML = '<br class="ProseMirror-trailingBreak">';
+            p.innerHTML = '<br>';
           } else {
             p.textContent = line;
           }
           editor.appendChild(p);
-          editor.dispatchEvent(new Event('input', { bubbles: true }));
-
-          // 每段之间随机停顿 300~1200ms
-          await new Promise(r => setTimeout(r, 300 + Math.random() * 900));
-        }
+        });
 
         // 标签
         if (tags && tags.length > 0) {
