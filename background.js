@@ -368,17 +368,36 @@ async function handleDailyStart() {
     return;
   }
 
+  // 模块1：随机延迟 0~45 分钟再开始，避免每天精确同一秒启动
+  const startDelayMs = randomInt(0, 45 * 60) * 1000;
+  console.log(`定时触发，随机等待 ${Math.round(startDelayMs / 1000)} 秒后开始发布`);
+  await new Promise(r => setTimeout(r, startDelayMs));
+
+  // 二次检查（等待期间可能手动启动了）
+  if (publishState.isPublishing) {
+    console.log('跳过定时发布：等待期间已有任务在执行');
+    return;
+  }
+
   const notesData = await getNotesMeta();
   if (!notesData || notesData.length === 0) return;
 
   const startIndex = (scheduleConfig.startRow - 1) + (scheduleConfig.currentDayOffset * scheduleConfig.dailyCount);
-  const count = Math.min(scheduleConfig.dailyCount, notesData.length - startIndex);
+  
+  // 模块1：每天发布篇数随机波动 70%~100%
+  const baseCount = scheduleConfig.dailyCount;
+  const count = Math.min(
+    Math.max(Math.floor(baseCount * (0.7 + Math.random() * 0.3)), 1),
+    notesData.length - startIndex
+  );
 
   if (count <= 0) {
     console.log('所有笔记已发布完毕');
     notifyPopup('COMPLETED');
     return;
   }
+
+  console.log(`今天计划发布 ${count} 篇（基础设置 ${baseCount} 篇）`);
 
   // 通知 popup
   chrome.runtime.sendMessage({
@@ -404,7 +423,7 @@ async function handleDailyStart() {
   }).catch(() => {});
 }
 
-// ===================== 发布单篇笔记 =====================
+// ===================== 发布单篇笔记（反检测优化版） =====================
 async function publishSingleNote(noteData, imageDataUrls, tabId) {
   publishState.currentAction = '打开发布页面';
   notifyPopup('ACTION_UPDATE');
@@ -413,14 +432,45 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
     url: 'https://creator.xiaohongshu.com/publish/publish?source=official&from=tab_switch'
   });
 
+  // 模块2：随机等待页面加载 4~12秒
   publishState.currentAction = '等待页面加载';
-  await new Promise(r => setTimeout(r, 5000));
+  await randomDelay(4000, 12000);
 
-  // 点击图文按钮
+  // 模块4：模拟真人浏览行为（随机滚动）
+  publishState.currentAction = '浏览页面';
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const scrollTimes = 1 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < scrollTimes; i++) {
+        const scrollY = Math.floor(Math.random() * 300);
+        window.scrollBy({ top: scrollY, behavior: 'smooth' });
+        await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 700));
+    }
+  });
+  await randomDelay(500, 1500);
+
+  // 点击图文按钮（模块3：完整鼠标事件链）
   publishState.currentAction = '点击图文按钮';
   const clickResult = await chrome.scripting.executeScript({
     target: { tabId },
-    function: () => {
+    func: () => {
+      function simulateClick(element) {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width * (0.3 + Math.random() * 0.4);
+        const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
+        const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        element.dispatchEvent(new MouseEvent('mouseover', opts));
+        element.dispatchEvent(new MouseEvent('mouseenter', opts));
+        element.dispatchEvent(new MouseEvent('mousemove', opts));
+        element.dispatchEvent(new MouseEvent('mousedown', opts));
+        element.dispatchEvent(new MouseEvent('mouseup', opts));
+        element.dispatchEvent(new MouseEvent('click', opts));
+      }
+
       return new Promise((resolve) => {
         const selectors = [
           '#web > div > div > div > div.header > div.header-tabs > div:nth-child(3) > span',
@@ -431,23 +481,21 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
 
         let found = false;
         const timer = setInterval(() => {
-          // 先尝试精确选择器
           for (const sel of selectors) {
             const btn = document.querySelector(sel);
             if (btn) {
               clearInterval(timer);
-              btn.click();
+              simulateClick(btn);
               found = true;
               resolve({ success: true });
               return;
             }
           }
-          // 回退: 文本匹配
           const spans = document.querySelectorAll('span');
           const btn = Array.from(spans).find(s => s.textContent.includes('图文'));
           if (btn) {
             clearInterval(timer);
-            btn.click();
+            simulateClick(btn);
             found = true;
             resolve({ success: true });
           }
@@ -467,7 +515,8 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
     throw new Error(clickResult[0].result.error || '未找到图文按钮');
   }
 
-  await new Promise(r => setTimeout(r, 5000));
+  // 模块2：随机等待 3~10秒
+  await randomDelay(3000, 10000);
 
   // 上传图片
   publishState.currentAction = '上传图片';
@@ -475,7 +524,7 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
 
   const uploadResult = await chrome.scripting.executeScript({
     target: { tabId },
-    function: (imageDataArray) => {
+    func: (imageDataArray) => {
       return new Promise((resolve) => {
         const selectors = [
           '#web > div > div > div > div.upload-content.hasBannerHeight > div.upload-wrapper > div > input',
@@ -521,165 +570,239 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
     throw new Error(`图片上传失败: ${uploadResult[0].result.error}`);
   }
 
+  // 模块2：随机等待图片上传 5~15秒
   publishState.currentAction = '等待图片上传完成';
-  await new Promise(r => setTimeout(r, 5000));
+  await randomDelay(5000, 15000);
 
-  // 填写内容 + 发布
+  // 模块3：模拟真人输入填写内容 + 发布
   publishState.currentAction = '填写笔记内容';
   notifyPopup('ACTION_UPDATE');
 
   await chrome.scripting.executeScript({
     target: { tabId },
-    function: (contentData, productId) => {
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          try {
-            // 标题
-            const titleSelectors = [
-              '#web > div > div > div > div > div.body > div.content > div.plugin.title-container > div > div > div.input > div.d-input-wrapper.d-inline-block.c-input_inner > div > input',
-              '.titleInput input',
-              'input[placeholder*="标题"]',
-              'input.d-text[type="text"]'
-            ];
-            let titleInput = null;
-            for (const sel of titleSelectors) {
-              titleInput = document.querySelector(sel);
-              if (titleInput) break;
-            }
-            if (titleInput) {
-              titleInput.value = contentData.title;
-              titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-              titleInput.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+    func: (contentData, productId) => {
+      // ===== 模块3：模拟真人交互的辅助函数 =====
+      
+      // 模拟完整鼠标点击事件链
+      function simulateClick(element) {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width * (0.3 + Math.random() * 0.4);
+        const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
+        const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        element.dispatchEvent(new MouseEvent('mouseover', opts));
+        element.dispatchEvent(new MouseEvent('mouseenter', opts));
+        element.dispatchEvent(new MouseEvent('mousemove', opts));
+        element.dispatchEvent(new MouseEvent('mousedown', opts));
+        element.dispatchEvent(new MouseEvent('mouseup', opts));
+        element.dispatchEvent(new MouseEvent('click', opts));
+      }
 
-            // 正文
-            const editorSelectors = [
-              '#web > div > div > div > div > div.body > div.content > div.plugin.editor-container > div > div > div.editor-container > div.editor-content > div > div',
-              '#quillEditor > div',
-              '.editor-content > div > div',
-              '[data-placeholder*="正文"]'
-            ];
-            let editor = null;
-            for (const sel of editorSelectors) {
-              editor = document.querySelector(sel);
-              if (editor) break;
-            }
+      // 模拟逐字输入标题（带完整键盘事件链）
+      async function simulateTyping(element, text) {
+        element.focus();
+        element.dispatchEvent(new Event('focus', { bubbles: true }));
+        element.value = '';
 
-            if (editor) {
-              editor.click();
-              editor.focus();
-              editor.innerHTML = '';
+        for (let i = 0; i < text.length; i++) {
+          const char = text[i];
+          const keyOpts = { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true };
 
-              const lines = contentData.body.split('\n');
-              lines.forEach(line => {
-                const p = document.createElement('p');
-                if (line.trim() === '') {
-                  p.innerHTML = '<br class="ProseMirror-trailingBreak">';
-                } else {
-                  p.textContent = line;
-                }
-                editor.appendChild(p);
-              });
+          element.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
 
-              // 标签
-              if (contentData.tags && contentData.tags.length > 0) {
-                const tagP = document.createElement('p');
-                contentData.tags.forEach((tag, idx) => {
-                  if (idx > 0) tagP.appendChild(document.createTextNode(' '));
-                  const tagLink = document.createElement('a');
-                  tagLink.className = 'tiptap-topic';
-                  tagLink.setAttribute('data-topic', JSON.stringify({ name: tag.replace('#', ''), id: 'auto-generated-id' }));
-                  tagLink.contentEditable = 'false';
-                  tagLink.innerHTML = `${tag}<span class="content-hide">[话题]#</span>`;
-                  tagP.appendChild(tagLink);
-                });
-                editor.appendChild(tagP);
-              }
-
-              editor.dispatchEvent(new Event('input', { bubbles: true }));
-              editor.dispatchEvent(new Event('change', { bubbles: true }));
-
-              // 发布流程
-              setTimeout(() => {
-                if (productId) {
-                  // 添加商品
-                  setTimeout(() => {
-                    const addBtn = document.querySelector('#web > div > div > div.publish-page-container > div.style-override-container.red-theme-override-container > div > div.publish-page-content > div.publish-page-content-business > div.publish-page-content-business-content.mt0 > div.button-group-content > div > div > div > div.multi-good-select-empty-btn > button > div > span');
-                    if (addBtn) {
-                      addBtn.click();
-                      setTimeout(() => {
-                        const searchBtn = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.d-grid > div:nth-child(2) > div > div > div');
-                        if (searchBtn) {
-                          searchBtn.click();
-                          setTimeout(() => {
-                            const searchInput = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.d-grid > div:nth-child(2) > div > div > div > div');
-                            if (searchInput) {
-                              searchInput.focus();
-                              document.execCommand('insertText', false, productId);
-                              searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-                              setTimeout(() => {
-                                const checkbox = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.goods-list-container > div.goods-list-normal > div > div.good-card-container > div.d-grid.d-checkbox.d-checkbox-main.d-clickable.good-selected > span');
-                                if (checkbox) {
-                                  checkbox.click();
-                                  setTimeout(() => {
-                                    const saveBtn = document.querySelector('body > div.d-modal-mask > div > div.d-modal-footer > div > button > div');
-                                    if (saveBtn) {
-                                      saveBtn.click();
-                                      setTimeout(() => {
-                                        clickPublishButton(resolve);
-                                      }, 2000);
-                                    } else { resolve({ success: false, error: '未找到保存按钮' }); }
-                                  }, 1000);
-                                } else { resolve({ success: false, error: '未找到商品选择框' }); }
-                              }, 2000);
-                            } else { resolve({ success: false, error: '未找到搜索输入框' }); }
-                          }, 1000);
-                        } else { resolve({ success: false, error: '未找到搜索按钮' }); }
-                      }, 1000);
-                    } else { resolve({ success: false, error: '未找到添加商品按钮' }); }
-                  }, 1000);
-                } else {
-                  setTimeout(() => {
-                    clickPublishButton(resolve);
-                  }, 1000);
-                }
-              }, 2000);
-            } else {
-              resolve({ success: false, error: '未找到正文编辑器' });
-            }
-
-            function clickPublishButton(cb) {
-              const publishBtn = document.querySelector('#web > div > div > div.publish-page-container > div.publish-page-publish-btn > button.d-button.d-button-default.d-button-with-content.--color-static.bold.--color-bg-fill.--color-text-paragraph.custom-button.bg-red');
-              if (publishBtn) {
-                publishBtn.click();
-                cb({ success: true });
-              } else {
-                cb({ success: false, error: '未找到发布按钮' });
-              }
-            }
-
-          } catch (error) {
-            resolve({ success: false, error: error.message });
+          // 用 nativeInputValueSetter 确保 React 受控组件能同步
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+          );
+          if (nativeSetter && nativeSetter.set) {
+            nativeSetter.set.call(element, text.substring(0, i + 1));
+          } else {
+            element.value = text.substring(0, i + 1);
           }
-        }, 1000);
+
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
+
+          // 每个字符间随机停顿 50~250ms，模拟真人打字速度
+          await new Promise(r => setTimeout(r, 50 + Math.random() * 200));
+        }
+
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      // 模拟逐段输入正文（段间有停顿）
+      async function simulateEditorInput(editor, bodyText, tags) {
+        simulateClick(editor);
+        editor.focus();
+        editor.innerHTML = '';
+
+        const lines = bodyText.split('\n');
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+          const line = lines[lineIdx];
+          const p = document.createElement('p');
+          if (line.trim() === '') {
+            p.innerHTML = '<br class="ProseMirror-trailingBreak">';
+          } else {
+            p.textContent = line;
+          }
+          editor.appendChild(p);
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+
+          // 每段之间随机停顿 300~1200ms
+          await new Promise(r => setTimeout(r, 300 + Math.random() * 900));
+        }
+
+        // 标签
+        if (tags && tags.length > 0) {
+          const tagP = document.createElement('p');
+          tags.forEach((tag, idx) => {
+            if (idx > 0) tagP.appendChild(document.createTextNode(' '));
+            const tagLink = document.createElement('a');
+            tagLink.className = 'tiptap-topic';
+            tagLink.setAttribute('data-topic', JSON.stringify({ name: tag.replace('#', ''), id: 'auto-generated-id' }));
+            tagLink.contentEditable = 'false';
+            tagLink.innerHTML = `${tag}<span class="content-hide">[话题]#</span>`;
+            tagP.appendChild(tagLink);
+          });
+          editor.appendChild(tagP);
+        }
+
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        editor.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      // ===== 主流程 =====
+      return new Promise(async (resolve) => {
+        // 随机停顿 1~4秒再开始填写
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 3000));
+
+        try {
+          // 标题
+          const titleSelectors = [
+            '#web > div > div > div > div > div.body > div.content > div.plugin.title-container > div > div > div.input > div.d-input-wrapper.d-inline-block.c-input_inner > div > input',
+            '.titleInput input',
+            'input[placeholder*="标题"]',
+            'input.d-text[type="text"]'
+          ];
+          let titleInput = null;
+          for (const sel of titleSelectors) {
+            titleInput = document.querySelector(sel);
+            if (titleInput) break;
+          }
+          if (titleInput) {
+            await simulateTyping(titleInput, contentData.title);
+          }
+
+          // 标题填完后随机停顿 1~3秒
+          await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+
+          // 正文
+          const editorSelectors = [
+            '#web > div > div > div > div > div.body > div.content > div.plugin.editor-container > div > div > div.editor-container > div.editor-content > div > div',
+            '#quillEditor > div',
+            '.editor-content > div > div',
+            '[data-placeholder*="正文"]'
+          ];
+          let editor = null;
+          for (const sel of editorSelectors) {
+            editor = document.querySelector(sel);
+            if (editor) break;
+          }
+
+          if (editor) {
+            await simulateEditorInput(editor, contentData.body, contentData.tags);
+
+            // 填完正文后随机停顿 2~6秒
+            await new Promise(r => setTimeout(r, 2000 + Math.random() * 4000));
+
+            // 发布流程
+            if (productId) {
+              // 添加商品（内部延时也随机化）
+              await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+              const addBtn = document.querySelector('#web > div > div > div.publish-page-container > div.style-override-container.red-theme-override-container > div > div.publish-page-content > div.publish-page-content-business > div.publish-page-content-business-content.mt0 > div.button-group-content > div > div > div > div.multi-good-select-empty-btn > button > div > span');
+              if (addBtn) {
+                simulateClick(addBtn);
+                await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+                const searchBtn = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.d-grid > div:nth-child(2) > div > div > div');
+                if (searchBtn) {
+                  simulateClick(searchBtn);
+                  await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+                  const searchInput = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.d-grid > div:nth-child(2) > div > div > div > div');
+                  if (searchInput) {
+                    searchInput.focus();
+                    document.execCommand('insertText', false, productId);
+                    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
+                    const checkbox = document.querySelector('body > div.d-modal-mask > div > div.d-modal-content > div > div.goods-list-container > div.goods-list-normal > div > div.good-card-container > div.d-grid.d-checkbox.d-checkbox-main.d-clickable.good-selected > span');
+                    if (checkbox) {
+                      simulateClick(checkbox);
+                      await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+                      const saveBtn = document.querySelector('body > div.d-modal-mask > div > div.d-modal-footer > div > button > div');
+                      if (saveBtn) {
+                        simulateClick(saveBtn);
+                        await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
+                        clickPublishButton(resolve);
+                      } else { resolve({ success: false, error: '未找到保存按钮' }); }
+                    } else { resolve({ success: false, error: '未找到商品选择框' }); }
+                  } else { resolve({ success: false, error: '未找到搜索输入框' }); }
+                } else { resolve({ success: false, error: '未找到搜索按钮' }); }
+              } else { resolve({ success: false, error: '未找到添加商品按钮' }); }
+            } else {
+              await new Promise(r => setTimeout(r, 1000 + Math.random() * 3000));
+              clickPublishButton(resolve);
+            }
+          } else {
+            resolve({ success: false, error: '未找到正文编辑器' });
+          }
+
+          function clickPublishButton(cb) {
+            const publishBtn = document.querySelector('#web > div > div > div.publish-page-container > div.publish-page-publish-btn > button.d-button.d-button-default.d-button-with-content.--color-static.bold.--color-bg-fill.--color-text-paragraph.custom-button.bg-red');
+            if (publishBtn) {
+              simulateClick(publishBtn);
+              cb({ success: true });
+            } else {
+              cb({ success: false, error: '未找到发布按钮' });
+            }
+          }
+
+        } catch (error) {
+          resolve({ success: false, error: error.message });
+        }
       });
     },
     args: [noteData, noteData.productId || '']
   });
 
-  // 等待发布完成
+  // 模块2：随机等待发布完成 25~50秒
   publishState.currentAction = '等待发布完成';
-  await new Promise(r => setTimeout(r, 30000));
+  await randomDelay(25000, 50000);
   publishState.currentAction = '发布完成';
 }
 
 // ===================== 工具函数 =====================
+
+// 随机延迟（毫秒范围）
+function randomDelay(minMs, maxMs) {
+  const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+  return new Promise(r => setTimeout(r, delay));
+}
+
+// 随机整数
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 function calculateWaitTime(config) {
   if (!config) config = publishState.publishConfig;
+  let baseTime;
   if (config.intervalType === 'random') {
-    return Math.floor(Math.random() * (config.maxInterval - config.minInterval + 1)) + config.minInterval;
+    baseTime = Math.floor(Math.random() * (config.maxInterval - config.minInterval + 1)) + config.minInterval;
+  } else {
+    baseTime = config.fixedInterval;
   }
-  return config.fixedInterval;
+  // 在基础时间上加 ±35% 的随机抖动，打破规律性
+  const jitter = baseTime * 0.35;
+  const finalTime = Math.floor(baseTime + (Math.random() * 2 - 1) * jitter);
+  return Math.max(finalTime, 60); // 最少60秒
 }
 
 
