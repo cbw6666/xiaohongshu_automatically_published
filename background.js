@@ -59,7 +59,7 @@ let publishState = {
 };
 
 // ===================== 定时发布状态 =====================
-let scheduleConfig = null; // { dailyStartTime, dailyCount, startRow, publishConfig, currentDayOffset }
+let scheduleConfig = null; // { dailyStartTime, dailyCount, startRow, publishConfig, currentNoteOffset }
 
 // ===================== 侧边栏打开 =====================
 chrome.action.onClicked.addListener(async (tab) => {
@@ -234,6 +234,13 @@ async function publishCurrentNote() {
 
     // 检查是否全部发完
     if (nextNoteIndex >= progress.endIndex) {
+      // 如果是定时发布模式，发送今日完成通知
+      if (scheduleConfig) {
+        chrome.runtime.sendMessage({
+          type: 'DAILY_PUBLISH_DONE',
+          data: { count: progress.totalNotes }
+        }).catch(() => {});
+      }
       notifyPopup('COMPLETED');
       await cleanup();
       return;
@@ -298,7 +305,7 @@ async function toggleSchedule(data) {
     dailyCount: data.dailyCount,
     startRow: data.startRow,
     publishConfig: data.publishConfig,
-    currentDayOffset: 0
+    currentNoteOffset: 0  // 累计已发布篇数（替代 currentDayOffset，避免跳篇）
   };
 
   await chrome.storage.local.set({ scheduleConfig });
@@ -354,10 +361,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       const data = await chrome.storage.local.get('scheduleConfig');
       scheduleConfig = data.scheduleConfig;
     }
-
     if (!scheduleConfig) return;
-
     await handleDailyStart();
+    return;
+  }
+
+  if (alarm.name === 'dailyPublishDelayed') {
+    // 随机延迟结束，真正开始今日发布
+    console.log('随机延迟 alarm 触发，开始执行今日定时发布');
+    await executeDailyPublish();
     return;
   }
 });
@@ -368,23 +380,43 @@ async function handleDailyStart() {
     return;
   }
 
-  // 模块1：随机延迟 0~45 分钟再开始，避免每天精确同一秒启动
-  const startDelayMs = randomInt(0, 45 * 60) * 1000;
-  console.log(`定时触发，随机等待 ${Math.round(startDelayMs / 1000)} 秒后开始发布`);
-  await new Promise(r => setTimeout(r, startDelayMs));
+  // 用 alarm 实现随机启动延迟（替代不可靠的 setTimeout）
+  const delayMinutes = randomInt(0, 45); // 0~45 分钟
+  console.log(`定时触发，随机等待 ${delayMinutes} 分钟后开始发布`);
 
-  // 二次检查（等待期间可能手动启动了）
+  if (delayMinutes > 0) {
+    // 创建一个延迟 alarm，到时间再真正开始
+    await chrome.alarms.create('dailyPublishDelayed', {
+      delayInMinutes: Math.max(delayMinutes, 0.5) // alarm 最小精度约 30 秒
+    });
+    return; // 等 alarm 触发后执行 executeDailyPublish
+  }
+
+  // 延迟为 0，直接执行
+  await executeDailyPublish();
+}
+
+async function executeDailyPublish() {
+  // 二次检查（延迟期间可能手动启动了）
   if (publishState.isPublishing) {
-    console.log('跳过定时发布：等待期间已有任务在执行');
+    console.log('跳过定时发布：已有任务在执行');
     return;
   }
+
+  // 从 storage 恢复 scheduleConfig（Service Worker 可能重启过）
+  if (!scheduleConfig) {
+    const data = await chrome.storage.local.get('scheduleConfig');
+    scheduleConfig = data.scheduleConfig;
+  }
+  if (!scheduleConfig) return;
 
   const notesData = await getNotesMeta();
   if (!notesData || notesData.length === 0) return;
 
-  const startIndex = (scheduleConfig.startRow - 1) + (scheduleConfig.currentDayOffset * scheduleConfig.dailyCount);
-  
-  // 模块1：每天发布篇数随机波动 70%~100%
+  // 用累计已发布篇数计算起始位置（修复跳篇问题）
+  const startIndex = (scheduleConfig.startRow - 1) + (scheduleConfig.currentNoteOffset || 0);
+
+  // 每天发布篇数随机波动 70%~100%
   const baseCount = scheduleConfig.dailyCount;
   const count = Math.min(
     Math.max(Math.floor(baseCount * (0.7 + Math.random() * 0.3)), 1),
@@ -397,30 +429,24 @@ async function handleDailyStart() {
     return;
   }
 
-  console.log(`今天计划发布 ${count} 篇（基础设置 ${baseCount} 篇）`);
+  console.log(`今天计划发布 ${count} 篇（基础设置 ${baseCount} 篇），从第 ${startIndex + 1} 篇开始`);
 
   // 通知 popup
   chrome.runtime.sendMessage({
     type: 'DAILY_PUBLISH_START',
-    data: { day: scheduleConfig.currentDayOffset + 1, startRow: startIndex + 1 }
+    data: { day: Math.floor((scheduleConfig.currentNoteOffset || 0) / baseCount) + 1, startRow: startIndex + 1 }
   }).catch(() => {});
 
-  // 递增天数偏移
-  scheduleConfig.currentDayOffset++;
+  // 按实际篇数递增偏移（修复跳篇：用实际 count 而非固定 dailyCount）
+  scheduleConfig.currentNoteOffset = (scheduleConfig.currentNoteOffset || 0) + count;
   await chrome.storage.local.set({ scheduleConfig });
 
-  // 启动发布
+  // 启动发布（DAILY_PUBLISH_DONE 通知已移至 publishCurrentNote 中全部完成时发送）
   await startPublishing({
     startIndex,
     count,
     publishConfig: scheduleConfig.publishConfig
   });
-
-  // 完成后通知
-  chrome.runtime.sendMessage({
-    type: 'DAILY_PUBLISH_DONE',
-    data: { count }
-  }).catch(() => {});
 }
 
 // ===================== 发布单篇笔记（反检测优化版） =====================
@@ -875,12 +901,14 @@ async function cleanup() {
     waitTime: 0
   };
   await chrome.alarms.clear('noteInterval');
+  await chrome.alarms.clear('dailyPublishDelayed');
   await chrome.storage.local.remove(['pState', 'publishProgress']);
 }
 
 async function stopPublishing() {
   publishState.isPublishing = false;
   await chrome.alarms.clear('noteInterval');
+  await chrome.alarms.clear('dailyPublishDelayed');
   await chrome.storage.local.remove('publishProgress');
   notifyPopup('STOPPED');
   try {
