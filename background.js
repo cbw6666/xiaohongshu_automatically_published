@@ -221,11 +221,59 @@ async function publishCurrentNote() {
 
     await publishSingleNote(note, imageDataUrls, progress.tabId);
 
-    // 发布成功，更新进度
+    // publishSingleNote 已经点击了发布按钮并返回
+    // 现在需要等待 25~50 秒让小红书完成发布跳转
+    // 用 alarm 代替 setTimeout，防止 Service Worker 休眠导致流程中断
+    const publishWaitSeconds = 25 + Math.floor(Math.random() * 26); // 25~50秒
+    const publishWaitMinutes = Math.max(publishWaitSeconds / 60, 0.5);
+
+    publishState.currentAction = '等待发布完成';
+    notifyPopup('ACTION_UPDATE');
+
+    // 保存当前进度到 storage，alarm 触发后可恢复
+    await chrome.storage.local.set({
+      publishProgress: {
+        ...progress,
+        currentAction: '等待发布完成',
+        publishWaitPending: true  // 标记：正在等待发布完成确认
+      }
+    });
+
+    await chrome.alarms.create('publishWaitComplete', {
+      delayInMinutes: publishWaitMinutes
+    });
+
+    console.log(`等待发布完成，alarm 设 ${publishWaitMinutes.toFixed(2)} 分钟（${publishWaitSeconds} 秒）`);
+
+  } catch (error) {
+    console.error('发布笔记失败:', error);
+    notifyPopup('ERROR', error.message);
+    await cleanup();
+  }
+}
+
+// ===================== 发布等待完成后处理（alarm 驱动） =====================
+async function onPublishWaitComplete() {
+  const saved = await chrome.storage.local.get('publishProgress');
+  const progress = saved.publishProgress;
+
+  if (!progress || !progress.isPublishing) {
+    await cleanup();
+    return;
+  }
+
+  try {
+    const i = progress.currentNoteIndex;
     const newCurrentIndex = progress.currentIndex + 1;
     const nextNoteIndex = i + 1;
 
+    // 恢复内存状态
+    publishState.isPublishing = true;
     publishState.currentIndex = newCurrentIndex;
+    publishState.totalNotes = progress.totalNotes;
+    publishState.publishConfig = progress.publishConfig;
+    publishState.tabId = progress.tabId;
+
     notifyPopup('NOTE_PUBLISHED', {
       index: i,
       current: newCurrentIndex,
@@ -234,7 +282,6 @@ async function publishCurrentNote() {
 
     // 检查是否全部发完
     if (nextNoteIndex >= progress.endIndex) {
-      // 如果是定时发布模式，发送今日完成通知
       if (scheduleConfig) {
         chrome.runtime.sendMessage({
           type: 'DAILY_PUBLISH_DONE',
@@ -246,10 +293,9 @@ async function publishCurrentNote() {
       return;
     }
 
-    // 还有下一篇，设置 alarm 等待
+    // 还有下一篇，设置篇间等待 alarm
     const waitTime = calculateWaitTime(progress.publishConfig);
 
-    // 更新 storage 中的进度（指向下一篇）
     await chrome.storage.local.set({
       publishProgress: {
         ...progress,
@@ -258,7 +304,8 @@ async function publishCurrentNote() {
         currentAction: '等待发布下一篇',
         waitTime,
         waitStartTime: Date.now(),
-        waitEndTime: Date.now() + waitTime * 1000
+        waitEndTime: Date.now() + waitTime * 1000,
+        publishWaitPending: false
       }
     });
 
@@ -273,8 +320,6 @@ async function publishCurrentNote() {
       currentTime: new Date().toLocaleTimeString()
     });
 
-    // 用 chrome.alarms 等待，不用 setTimeout！
-    // alarms 最小精度约 30 秒，delayInMinutes 小于 0.5 时 Chrome 会自动拉到约 30 秒
     const delayMinutes = Math.max(waitTime / 60, 0.5);
     await chrome.alarms.create('noteInterval', {
       delayInMinutes: delayMinutes
@@ -283,7 +328,7 @@ async function publishCurrentNote() {
     console.log(`下一篇将在 ${waitTime} 秒后发布（alarm 设 ${delayMinutes.toFixed(2)} 分钟）`);
 
   } catch (error) {
-    console.error('发布笔记失败:', error);
+    console.error('发布等待完成处理失败:', error);
     notifyPopup('ERROR', error.message);
     await cleanup();
   }
@@ -348,6 +393,13 @@ function getScheduleState() {
 
 // ===================== Alarm 统一监听 =====================
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'publishWaitComplete') {
+    // 发布等待完成，处理进度更新和篇间等待
+    console.log('发布等待 alarm 触发，处理发布完成逻辑');
+    await onPublishWaitComplete();
+    return;
+  }
+
   if (alarm.name === 'noteInterval') {
     // 篇间等待结束，发布下一篇
     console.log('篇间等待 alarm 触发，开始发布下一篇');
@@ -604,7 +656,7 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
   publishState.currentAction = '填写笔记内容';
   notifyPopup('ACTION_UPDATE');
 
-  await chrome.scripting.executeScript({
+  const fillResult = await chrome.scripting.executeScript({
     target: { tabId },
     func: (contentData, productId) => {
       // ===== 模块3：模拟真人交互的辅助函数 =====
@@ -792,9 +844,14 @@ async function publishSingleNote(noteData, imageDataUrls, tabId) {
     args: [noteData, noteData.productId || '']
   });
 
-  // 模块2：随机等待发布完成 25~50秒
-  publishState.currentAction = '等待发布完成';
-  await randomDelay(25000, 50000);
+  // 检查填写/发布结果
+  if (fillResult && fillResult[0] && fillResult[0].result && !fillResult[0].result.success) {
+    throw new Error(`填写/发布失败: ${fillResult[0].result.error}`);
+  }
+
+  // 注意：不在这里用 setTimeout 等待发布完成！
+  // Service Worker 在 popup 关闭时可能 30 秒内休眠，导致 setTimeout 永远不会回调。
+  // 等待逻辑改由 publishCurrentNote 中的 alarm 机制驱动。
   publishState.currentAction = '发布完成';
 }
 
@@ -896,6 +953,7 @@ async function cleanup() {
   };
   await chrome.alarms.clear('noteInterval');
   await chrome.alarms.clear('dailyPublishDelayed');
+  await chrome.alarms.clear('publishWaitComplete');
   await chrome.storage.local.remove(['pState', 'publishProgress']);
 }
 
@@ -903,6 +961,7 @@ async function stopPublishing() {
   publishState.isPublishing = false;
   await chrome.alarms.clear('noteInterval');
   await chrome.alarms.clear('dailyPublishDelayed');
+  await chrome.alarms.clear('publishWaitComplete');
   await chrome.storage.local.remove('publishProgress');
   notifyPopup('STOPPED');
   try {
